@@ -3,59 +3,53 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>AI Revision Quiz</title>
+  <title>AI Revision Quiz (MCQ)</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1220; color:#fff; margin:0; padding:20px; }
     .box { max-width: 920px; margin: 0 auto; background:#111a2e; padding:20px; border-radius:12px; }
-    h1 { margin: 0 0 10px; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    button { padding:10px 14px; border-radius:10px; border:0; cursor:pointer; }
-    button:disabled { opacity:.6; cursor:not-allowed; }
+    h1 { margin: 0 0 8px; }
+    .meta { opacity:.85; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+    button { padding:10px 14px; border-radius:10px; border:0; cursor:pointer; font-weight:600; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
     input[type="file"] { padding:6px; }
-    .status { margin:10px 0; padding:10px; border-radius:10px; background:rgba(255,255,255,.08); }
+    .status { margin-top:12px; padding:10px; border-radius:10px; background: rgba(255,255,255,.08); }
     .status.ok { background: rgba(56,211,159,.15); }
     .status.bad { background: rgba(255,107,107,.15); }
-    .card { margin-top: 12px; padding: 14px; border-radius: 12px; background: rgba(255,255,255,.06); }
-    .meta { opacity:.85; font-size: 0.95rem; }
-    .options label { display:block; padding:8px; border-radius:10px; background: rgba(255,255,255,.05); margin:8px 0; cursor:pointer; }
-    .options input { margin-right: 8px; }
-    input[type="text"] { width:100%; padding:10px; border-radius:10px; border:0; margin:8px 0; }
-    .feedback { margin-top:10px; font-weight:bold; }
+    .card { margin-top: 14px; padding: 14px; border-radius: 12px; background: rgba(255,255,255,.06); }
+    .qmeta { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; opacity:.9; }
+    .options label { display:block; padding:10px; border-radius:10px; background: rgba(255,255,255,.06); margin:10px 0; cursor:pointer; }
+    .options input { margin-right: 10px; }
+    .feedback { margin-top:10px; font-weight:700; }
     .feedback.ok { color:#38d39f; }
     .feedback.bad { color:#ff6b6b; }
+    .tiny { font-size: .92rem; opacity:.85; }
     code { background: rgba(255,255,255,.10); padding: 2px 6px; border-radius: 8px; }
   </style>
 </head>
 <body>
   <div class="box">
     <h1>AI Revision Quiz</h1>
-    <p class="meta">Upload a PDF → generate 30 MCQ / 20 TF / 10 FIB. Make sure you open this page via <code>http://localhost:3000</code>.</p>
+    <div class="meta">Upload a PDF → generate <b>50 MCQ</b> (no TF / no FIB).</div>
+    <div class="tiny">Tip: If you updated the code but still see old text, do a hard refresh: <code>Ctrl + F5</code>.</div>
 
     <div class="card">
       <div class="row">
         <input type="file" id="pdfFile" accept="application/pdf">
-        <button id="genBtn">Generate Quiz</button>
+        <button id="genBtn">Generate 50 MCQ</button>
+        <button id="startBtn" disabled>Start Quiz</button>
+        <button id="restartBtn" disabled>Restart</button>
       </div>
-      <div id="genStatus" class="status">Status: Waiting for PDF.</div>
-    </div>
-
-    <div class="card">
-      <div class="row">
-        <button id="startMcq" disabled>Start MCQ</button>
-        <button id="startTf" disabled>Start True/False</button>
-        <button id="startFib" disabled>Start Fill-in-the-Blank</button>
-        <button id="restartBtn" disabled>Restart current mode</button>
-      </div>
-      <p class="meta">Tip: Enter = Check/Next (when supported). If nothing happens, open DevTools Console (F12).</p>
+      <div id="status" class="status">Status: Waiting for PDF.</div>
     </div>
 
     <div class="card" id="quizCard" style="display:none">
-      <div class="row">
-        <div class="meta" id="modeLabel">Mode:</div>
-        <div class="meta" id="progressLabel">Question:</div>
+      <div class="qmeta">
+        <div id="progress">Question</div>
+        <div id="score">Score</div>
       </div>
 
-      <h3 id="prompt"></h3>
+      <h3 id="prompt" style="margin-top:10px"></h3>
 
       <div id="options" class="options"></div>
 
@@ -69,25 +63,20 @@
   </div>
 
 <script>
-  // ====== State ======
-  let BANK = { mcq: [], tf: [], fib: [] };
-  let mode = null;
+  // ----------------------------
+  // State
+  // ----------------------------
+  let BANK = { mcq: [] };
   let idx = 0;
+  let score = 0;
   let checked = false;
 
-  // ====== Helpers ======
   const $ = (id) => document.getElementById(id);
-  const setStatus = (msg, kind="") => {
-    const el = $("genStatus");
+
+  function setStatus(msg, kind="") {
+    const el = $("status");
     el.textContent = "Status: " + msg;
     el.className = "status " + (kind || "");
-  };
-  const norm = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
-
-  function enableModeButtons(enabled) {
-    $("startMcq").disabled = !enabled;
-    $("startTf").disabled  = !enabled;
-    $("startFib").disabled = !enabled;
   }
 
   function showQuiz(show) {
@@ -95,7 +84,13 @@
     $("restartBtn").disabled = !show;
   }
 
-  // ====== Generate Quiz ======
+  function enableStart(enabled) {
+    $("startBtn").disabled = !enabled;
+  }
+
+  // ----------------------------
+  // Generate
+  // ----------------------------
   $("genBtn").addEventListener("click", async () => {
     console.log("Generate clicked");
     const file = $("pdfFile").files && $("pdfFile").files[0];
@@ -106,16 +101,15 @@
       return;
     }
 
-    // Basic validation
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
       alert("That doesn’t look like a PDF. Please choose a .pdf file.");
       setStatus("Selected file is not a PDF.", "bad");
       return;
     }
 
-    enableModeButtons(false);
+    enableStart(false);
     showQuiz(false);
-    setStatus("Uploading PDF and generating questions… (please wait)", "");
+    setStatus("Uploading PDF and generating 50 MCQ… please wait.", "");
 
     const fd = new FormData();
     fd.append("pdf", file);
@@ -126,169 +120,128 @@
         body: fd
       });
 
-      console.log("Server response status:", res.status);
+      console.log("Server status:", res.status);
 
       if (!res.ok) {
         const txt = await res.text();
         console.error("Server error body:", txt);
-        setStatus("Server returned error " + res.status + ". See console.", "bad");
-        alert("Server error: " + res.status + "\n\nOpen DevTools (F12) → Console to see details.");
+        setStatus("Server error " + res.status + ". Open Console (F12).", "bad");
+        alert("Server error. Open DevTools (F12) → Console for details.");
         return;
       }
 
       const data = await res.json();
-      console.log("Quiz JSON received:", data);
+      console.log("Quiz JSON:", data);
 
-      // Basic sanity checks
-      if (!data || !Array.isArray(data.mcq) || !Array.isArray(data.tf) || !Array.isArray(data.fib)) {
+      if (!data || !Array.isArray(data.mcq)) {
         console.error("Unexpected JSON shape:", data);
-        setStatus("Bad JSON format from server. See console.", "bad");
-        alert("Bad JSON format returned. Check Console (F12).");
+        setStatus("Bad JSON returned (missing mcq). Open Console (F12).", "bad");
+        alert("Bad JSON returned. Check Console (F12).");
         return;
       }
 
-      BANK = data;
-      setStatus(`Generated: ${BANK.mcq.length} MCQ, ${BANK.tf.length} TF, ${BANK.fib.length} FIB`, "ok");
-      enableModeButtons(true);
-      alert("Quiz generated! Now click a mode button to start.");
+      // Keep only MCQ
+      BANK = { mcq: data.mcq };
+      setStatus(`Generated ${BANK.mcq.length} MCQ. Click “Start Quiz”.`, "ok");
+      enableStart(BANK.mcq.length > 0);
 
     } catch (e) {
       console.error("Fetch failed:", e);
-      setStatus("Network error: cannot reach server. See console.", "bad");
-      alert("Network error. Are you opening this page at http://localhost:3000 ?");
+      setStatus("Network error. Open Console (F12).", "bad");
+      alert("Network error. If you’re on Render, try refreshing the page.");
     }
   });
 
-  // ====== Start modes ======
-  $("startMcq").addEventListener("click", () => start("mcq"));
-  $("startTf").addEventListener("click", () => start("tf"));
-  $("startFib").addEventListener("click", () => start("fib"));
-  $("restartBtn").addEventListener("click", () => start(mode));
-
-  function start(m) {
-    if (!BANK[m] || BANK[m].length === 0) {
-      alert("No questions in this mode. Generate quiz first.");
-      return;
-    }
-    mode = m;
+  // ----------------------------
+  // Start / Restart
+  // ----------------------------
+  $("startBtn").addEventListener("click", () => {
+    if (!BANK.mcq.length) return;
     idx = 0;
+    score = 0;
     render();
     showQuiz(true);
-  }
+  });
 
-  // ====== Render question ======
+  $("restartBtn").addEventListener("click", () => {
+    if (!BANK.mcq.length) return;
+    idx = 0;
+    score = 0;
+    render();
+    showQuiz(true);
+  });
+
+  // ----------------------------
+  // Render question
+  // ----------------------------
   function render() {
     checked = false;
     $("nextBtn").disabled = true;
     $("feedback").textContent = "";
     $("feedback").className = "feedback";
 
-    const list = BANK[mode];
-    const q = list[idx];
+    const total = BANK.mcq.length;
+    const q = BANK.mcq[idx];
 
-    $("modeLabel").textContent = "Mode: " + (mode === "mcq" ? "MCQ" : mode === "tf" ? "True/False" : "Fill-in-the-Blank");
-    $("progressLabel").textContent = `Question ${idx + 1} / ${list.length}`;
-    $("prompt").textContent = q.prompt || "(no prompt)";
+    $("progress").textContent = `Question ${idx + 1} / ${total}`;
+    $("score").textContent = `Score ${score} / ${total}`;
 
-    const options = $("options");
-    options.innerHTML = "";
+    $("prompt").textContent = q?.prompt || "(no prompt)";
 
-    if (mode === "mcq") {
-      const opts = q.options || {};
-      ["A","B","C","D"].forEach(letter => {
-        options.innerHTML += `
-          <label>
-            <input type="radio" name="ans" value="${letter}">
-            <strong>${letter})</strong> ${opts[letter] ?? ""}
-          </label>
-        `;
-      });
-    }
+    const opts = q?.options || {};
+    const optionsEl = $("options");
+    optionsEl.innerHTML = "";
 
-    if (mode === "tf") {
-      ["True","False"].forEach(v => {
-        options.innerHTML += `
-          <label>
-            <input type="radio" name="ans" value="${v}"> <strong>${v}</strong>
-          </label>
-        `;
-      });
-    }
-
-    if (mode === "fib") {
-      // For fib, q.answers is array-of-arrays; number of blanks = len(answers)
-      const blanks = Array.isArray(q.answers) ? q.answers.length : 1;
-      for (let i = 0; i < blanks; i++) {
-        const input = document.createElement("input");
-        input.type = "text";
-        input.id = "blank_" + i;
-        input.placeholder = "Blank " + (i + 1);
-        input.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            if (!checked) check();
-            else next();
-          }
-        });
-        options.appendChild(input);
-      }
-      setTimeout(() => $("blank_0")?.focus(), 0);
-    }
+    ["A","B","C","D"].forEach(letter => {
+      const text = (opts[letter] ?? "");
+      const label = document.createElement("label");
+      label.innerHTML = `
+        <input type="radio" name="ans" value="${letter}">
+        <strong>${letter})</strong> ${escapeHtml(text)}
+      `;
+      optionsEl.appendChild(label);
+    });
   }
 
-  // ====== Check answer ======
-  $("checkBtn").addEventListener("click", check);
-  $("nextBtn").addEventListener("click", next);
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (m) => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
+    }[m]));
+  }
 
-  function check() {
-    const list = BANK[mode];
-    const q = list[idx];
-    let ok = true;
+  // ----------------------------
+  // Check / Next
+  // ----------------------------
+  $("checkBtn").addEventListener("click", () => {
+    if (!BANK.mcq.length) return;
 
-    if (mode === "mcq") {
-      const picked = document.querySelector('input[name="ans"]:checked');
-      if (!picked) { alert("Please select an option."); return; }
-      ok = (picked.value === q.answer);
-      if (!ok) {
-        $("feedback").textContent = `Incorrect. Correct answer: ${q.answer}`;
-      } else {
-        $("feedback").textContent = "Correct!";
-      }
-    }
+    const picked = document.querySelector('input[name="ans"]:checked');
+    if (!picked) { alert("Please select an option."); return; }
 
-    if (mode === "tf") {
-      const picked = document.querySelector('input[name="ans"]:checked');
-      if (!picked) { alert("Please select True or False."); return; }
-      ok = (norm(picked.value) === norm(q.answer));
-      $("feedback").textContent = ok ? "Correct!" : `Incorrect. Correct answer: ${q.answer}`;
-    }
+    const q = BANK.mcq[idx];
+    const correct = q.answer;
 
-    if (mode === "fib") {
-      ok = true;
-      const answers = Array.isArray(q.answers) ? q.answers : [];
-      for (let i = 0; i < answers.length; i++) {
-        const val = norm($("blank_" + i).value);
-        const acceptable = answers[i].map(norm);
-        if (!val || !acceptable.includes(val)) ok = false;
-      }
-      $("feedback").textContent = ok ? "Correct!" : "Incorrect. (Try a different wording/spelling.)";
-    }
+    const ok = (picked.value === correct);
+    if (ok) score++;
 
+    $("feedback").textContent = ok ? "Correct!" : `Incorrect. Correct answer: ${correct}`;
     $("feedback").className = "feedback " + (ok ? "ok" : "bad");
+
     checked = true;
     $("nextBtn").disabled = false;
-  }
+  });
 
-  function next() {
-    const list = BANK[mode];
-    if (idx < list.length - 1) {
+  $("nextBtn").addEventListener("click", () => {
+    if (!BANK.mcq.length) return;
+
+    if (idx < BANK.mcq.length - 1) {
       idx++;
       render();
     } else {
-      alert("Done! You reached the end of this mode.");
+      alert(`Done! Final score: ${score} / ${BANK.mcq.length}`);
       showQuiz(false);
     }
-  }
+  });
 </script>
 </body>
 </html>
