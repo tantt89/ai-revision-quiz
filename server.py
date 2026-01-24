@@ -4,11 +4,11 @@ import json
 from flask import Flask, request, jsonify
 from openai import OpenAI
 
-# Serve static files from /public
-# With static_url_path="", /quiz.html maps to public/quiz.html
+# -----------------------------
+# Flask setup
+# -----------------------------
 app = Flask(__name__, static_folder="public", static_url_path="")
 
-# OPENAI_API_KEY must be set in Render Environment Variables (or locally)
 client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY"),
     timeout=180
@@ -16,17 +16,18 @@ client = OpenAI(
 
 @app.route("/")
 def index():
-    # Serve the quiz UI
+    # Serve public/quiz.html
     return app.send_static_file("quiz.html")
 
 
-def schema_mcq_only():
-    # Strict schema: object must be closed (additionalProperties=False everywhere)
-    # We keep tf/fib fields but return them as empty arrays.
+# -----------------------------
+# STRICT MCQ-ONLY SCHEMA
+# -----------------------------
+def mcq_schema():
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["mcq", "tf", "fib"],
+        "required": ["mcq"],
         "properties": {
             "mcq": {
                 "type": "array",
@@ -47,64 +48,53 @@ def schema_mcq_only():
                                 "D": {"type": "string"},
                             },
                         },
-                        "answer": {"type": "string", "enum": ["A", "B", "C", "D"]},
+                        "answer": {
+                            "type": "string",
+                            "enum": ["A", "B", "C", "D"]
+                        },
                     },
                 },
-            },
-            "tf": {
-    "type": "array",
-    "items": {"type": "object", "additionalProperties": False},
-    "maxItems": 0
-},
-"fib": {
-    "type": "array",
-    "items": {"type": "object", "additionalProperties": False},
-    "maxItems": 0
-},
+            }
+        },
     }
 
 
-def normalize_prompt(p: str) -> str:
-    # Stronger dedupe: ignore case + extra spaces
-    return " ".join((p or "").strip().lower().split())
+# -----------------------------
+# Helpers
+# -----------------------------
+def normalize(text: str) -> str:
+    return " ".join((text or "").lower().strip().split())
 
 
 def dedupe_mcq(items):
     seen = set()
     out = []
-    for it in items or []:
-        p = normalize_prompt(it.get("prompt", ""))
-        if not p:
+    for q in items or []:
+        key = normalize(q.get("prompt"))
+        if not key or key in seen:
             continue
-        if p in seen:
-            continue
-        seen.add(p)
-        out.append(it)
+        seen.add(key)
+        out.append(q)
     return out
 
 
-def generate_pass(pdf_filename: str, pdf_data_url: str, mcq_count: int, label: str):
-    schema = schema_mcq_only()
+def generate_pass(pdf_name, pdf_data_url, count, label):
+    schema = mcq_schema()
 
     instructions = f"""
 Generate revision questions strictly from the PDF content ONLY.
 
-Return ONLY JSON matching the provided schema. No extra fields.
+Return ONLY JSON matching the provided schema.
 
 This is {label} of 2.
-Create ONLY Multiple Choice Questions (MCQ): {mcq_count}
-Create 0 True/False and 0 Fill-in-the-Blank.
+Generate EXACTLY {count} Multiple Choice Questions (MCQ).
 
 Rules:
-- Each question MUST test a different concept or fact from the PDF.
-- Do NOT repeat or paraphrase earlier questions; keep all questions distinct.
-- MCQ: Exactly 4 options (A–D), only ONE correct.
+- Each question must test a DIFFERENT concept or fact.
+- Do NOT repeat or paraphrase earlier questions.
+- Exactly 4 options (A–D).
+- Only ONE correct answer.
 - No explanations.
-
-Output requirements:
-- "mcq" must contain exactly {mcq_count} items (if possible).
-- "tf" must be [].
-- "fib" must be [].
 """
 
     resp = client.responses.create(
@@ -116,7 +106,7 @@ Output requirements:
                 "content": [
                     {
                         "type": "input_file",
-                        "filename": pdf_filename,
+                        "filename": pdf_name,
                         "file_data": pdf_data_url,
                     }
                 ],
@@ -135,51 +125,45 @@ Output requirements:
     return json.loads(resp.output_text)
 
 
+# -----------------------------
+# API
+# -----------------------------
 @app.route("/api/generate-quiz-from-pdf", methods=["POST"])
 def generate_quiz():
     try:
         if "pdf" not in request.files:
-            return "No PDF uploaded (field name must be 'pdf')", 400
+            return "No PDF uploaded", 400
 
         pdf = request.files["pdf"]
-        pdf_bytes = pdf.read()
-        if not pdf_bytes:
-            return "PDF appears empty", 400
+        data = pdf.read()
+        if not data:
+            return "Empty PDF", 400
 
-        # Convert to base64 data URL required for PDF file input
-        raw_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-        pdf_data_url = "data:application/pdf;base64," + raw_b64
+        # Convert PDF → base64 data URL
+        pdf_b64 = base64.b64encode(data).decode("utf-8")
+        pdf_data_url = "data:application/pdf;base64," + pdf_b64
 
-        # 50 MCQ total, split into 2 passes of 25 to reduce timeouts
-        print("Generate request received. Starting PASS 1 (25 MCQ)…", flush=True)
+        print("PASS 1: generating 25 MCQ…", flush=True)
         q1 = generate_pass(pdf.filename or "upload.pdf", pdf_data_url, 25, "PASS 1")
 
-        print("PASS 1 complete. Starting PASS 2 (25 MCQ)…", flush=True)
+        print("PASS 2: generating 25 MCQ…", flush=True)
         q2 = generate_pass(pdf.filename or "upload.pdf", pdf_data_url, 25, "PASS 2")
 
         # Merge + dedupe
-        merged_mcq = dedupe_mcq((q1.get("mcq") or []) + (q2.get("mcq") or []))
+        mcq = dedupe_mcq((q1.get("mcq") or []) + (q2.get("mcq") or []))
+        mcq = mcq[:50]
 
-        # If dedupe reduced count < 50, we still return what we have (best effort)
-        merged_mcq = merged_mcq[:50]
-
-        result = {
-            "mcq": merged_mcq,
-            "tf": [],
-            "fib": [],
-        }
-
-        print(f"Done. Returning {len(result['mcq'])} MCQ.", flush=True)
-        return jsonify(result)
+        print(f"Returning {len(mcq)} MCQ", flush=True)
+        return jsonify({"mcq": mcq})
 
     except Exception as e:
         print("ERROR:", repr(e), flush=True)
-        return f"Server error: {str(e)}", 500
+        return jsonify({"error": str(e)}), 500
 
 
-# Local run only. Gunicorn ignores this block.
+# -----------------------------
+# Local run (ignored by gunicorn)
+# -----------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
-    print(f"Local run: http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
