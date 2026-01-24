@@ -3,15 +3,17 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>AI Revision Quiz (Next 20)</title>
+  <title>AI Revision Quiz</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1220; color:#fff; margin:0; padding:20px; }
-    .box { max-width: 920px; margin: 0 auto; background:#111a2e; padding:20px; border-radius:12px; }
+    .box { max-width: 980px; margin: 0 auto; background:#111a2e; padding:20px; border-radius:12px; }
     h1 { margin: 0 0 8px; }
-    .meta { opacity:.85; margin-bottom: 8px; }
+    .meta { opacity:.85; margin-bottom: 10px; }
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
     button { padding:10px 14px; border-radius:10px; border:0; cursor:pointer; font-weight:600; }
     button:disabled { opacity:.55; cursor:not-allowed; }
+    input[type="file"] { padding:6px; }
+    input[type="number"] { width: 90px; padding:8px; border-radius:10px; border:0; }
     .status { margin-top:12px; padding:10px; border-radius:10px; background: rgba(255,255,255,.08); }
     .status.ok { background: rgba(56,211,159,.15); }
     .status.bad { background: rgba(255,107,107,.15); }
@@ -23,30 +25,39 @@
     .feedback.ok { color:#38d39f; }
     .feedback.bad { color:#ff6b6b; }
     .tiny { font-size: .92rem; opacity:.85; }
-    code { background: rgba(255,255,255,.10); padding: 2px 6px; border-radius: 8px; }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background: rgba(255,255,255,.10); }
   </style>
 </head>
 <body>
   <div class="box">
     <h1>AI Revision Quiz</h1>
-    <div class="meta">Upload one PDF, then click <b>Next 20</b> as many times as you want.</div>
-    <div class="tiny">If you change PDF midway, click <b>Reset</b> first.</div>
+    <div class="meta">Select a PDF and page range. Generate questions continuously without restarting.</div>
 
     <div class="card">
       <div class="row">
         <input type="file" id="pdfFile" accept="application/pdf">
-        <button id="next20Btn">Next 20</button>
-        <button id="startBtn" disabled>Start Quiz</button>
+
+        <label class="pill">Start page
+          <input type="number" id="startPage" value="1" min="1">
+        </label>
+
+        <label class="pill">End page
+          <input type="number" id="endPage" value="5" min="1">
+        </label>
+
+        <button id="getBtn">Get Questions</button>
+        <button id="startBtn" disabled>Start / Continue Quiz</button>
         <button id="resetBtn">Reset</button>
       </div>
+
       <div id="status" class="status">Status: Waiting for PDF.</div>
-      <div class="tiny" id="bankInfo"></div>
+      <div id="info" class="tiny"></div>
     </div>
 
     <div class="card" id="quizCard" style="display:none">
       <div class="qmeta">
-        <div id="progress">Question</div>
-        <div id="score">Score</div>
+        <div id="progress"></div>
+        <div id="score"></div>
       </div>
 
       <h3 id="prompt" style="margin-top:10px"></h3>
@@ -63,7 +74,7 @@
 
 <script>
   // ----------------------------
-  // Session ID (per user)
+  // Session ID
   // ----------------------------
   function getSessionId() {
     const key = "ai_quiz_session_id";
@@ -79,7 +90,7 @@
   // ----------------------------
   // State
   // ----------------------------
-  let BANK = [];   // all MCQ accumulated
+  let BANK = [];
   let idx = 0;
   let score = 0;
 
@@ -91,8 +102,8 @@
     el.className = "status " + (kind || "");
   }
 
-  function updateBankInfo(extra="") {
-    $("bankInfo").textContent = `Current bank: ${BANK.length} MCQ. ${extra}`.trim();
+  function setInfo(msg="") {
+    $("info").textContent = msg;
   }
 
   function showQuiz(show) {
@@ -106,47 +117,59 @@
   }
 
   // ----------------------------
-  // Next 20
+  // Generate / append questions
   // ----------------------------
-  $("next20Btn").addEventListener("click", async () => {
-    const file = $("pdfFile").files && $("pdfFile").files[0];
+  $("getBtn").addEventListener("click", async () => {
+    const file = $("pdfFile").files[0];
     if (!file) {
       alert("Please select a PDF first.");
       setStatus("No PDF selected.", "bad");
       return;
     }
 
-    $("next20Btn").disabled = true;
-    setStatus("Generating next 20… please wait.", "");
+    const startPage = $("startPage").value;
+    const endPage = $("endPage").value;
+
+    $("getBtn").disabled = true;
+    setStatus("Generating questions… please wait.");
+
+    const previousCount = BANK.length;
 
     const fd = new FormData();
     fd.append("session_id", SESSION_ID);
+    fd.append("start_page", startPage);
+    fd.append("end_page", endPage);
     fd.append("pdf", file);
 
     try {
       const res = await fetch("/api/next-20", { method: "POST", body: fd });
-
       if (!res.ok) {
-        const txt = await res.text();
-        console.error("Server error:", txt);
-        setStatus("Server error. See Console (F12).", "bad");
-        alert("Server error. Open DevTools (F12) → Console.");
+        const err = await res.json().catch(() => ({ error: "Server error" }));
+        console.error(err);
+        setStatus(err.error || "Server error.", "bad");
         return;
       }
 
       const data = await res.json();
-      BANK = data.mcq || [];
-      const added = data.added ?? 0;
+      BANK = data.mcq || BANK;
 
+      const added = data.added ?? (BANK.length - previousCount);
       setStatus(`Added ${added} new questions.`, "ok");
-      updateBankInfo();
+      setInfo(`Total questions available: ${BANK.length}`);
+
       $("startBtn").disabled = BANK.length === 0;
+
+      // 🔑 KEY FIX: do NOT reset idx
+      // If user already finished old questions, jump to first new one
+      if (previousCount > 0 && idx >= previousCount) {
+        renderQuestion();
+      }
 
     } catch (e) {
       console.error(e);
-      setStatus("Network error. Try refresh.", "bad");
+      setStatus("Network error.", "bad");
     } finally {
-      $("next20Btn").disabled = false;
+      $("getBtn").disabled = false;
     }
   });
 
@@ -156,17 +179,15 @@
   $("resetBtn").addEventListener("click", async () => {
     const fd = new FormData();
     fd.append("session_id", SESSION_ID);
+    try { await fetch("/api/reset", { method: "POST", body: fd }); } catch {}
 
-    try {
-      await fetch("/api/reset", { method: "POST", body: fd });
-    } catch {}
     BANK = [];
     idx = 0;
     score = 0;
     showQuiz(false);
     $("startBtn").disabled = true;
-    updateBankInfo("Reset complete.");
-    setStatus("Reset complete. Upload a PDF and click Next 20.", "ok");
+    setStatus("Reset complete.", "ok");
+    setInfo("");
   });
 
   // ----------------------------
@@ -174,13 +195,11 @@
   // ----------------------------
   $("startBtn").addEventListener("click", () => {
     if (!BANK.length) return;
-    idx = 0;
-    score = 0;
-    render();
+    renderQuestion();
     showQuiz(true);
   });
 
-  function render() {
+  function renderQuestion() {
     $("nextBtn").disabled = true;
     $("feedback").textContent = "";
     $("feedback").className = "feedback";
@@ -190,28 +209,25 @@
 
     $("progress").textContent = `Question ${idx + 1} / ${total}`;
     $("score").textContent = `Score ${score} / ${total}`;
-    $("prompt").textContent = q?.prompt || "(no prompt)";
+    $("prompt").textContent = q.prompt;
 
-    const opts = q?.options || {};
+    const opts = q.options || {};
     const optionsEl = $("options");
     optionsEl.innerHTML = "";
 
     ["A","B","C","D"].forEach(letter => {
-      const text = opts[letter] ?? "";
       const label = document.createElement("label");
       label.innerHTML = `
         <input type="radio" name="ans" value="${letter}">
-        <strong>${letter})</strong> ${escapeHtml(text)}
+        <strong>${letter})</strong> ${escapeHtml(opts[letter] || "")}
       `;
       optionsEl.appendChild(label);
     });
   }
 
   $("checkBtn").addEventListener("click", () => {
-    if (!BANK.length) return;
-
     const picked = document.querySelector('input[name="ans"]:checked');
-    if (!picked) { alert("Please select an option."); return; }
+    if (!picked) { alert("Select an option."); return; }
 
     const correct = BANK[idx].answer;
     const ok = picked.value === correct;
@@ -225,15 +241,11 @@
   $("nextBtn").addEventListener("click", () => {
     if (idx < BANK.length - 1) {
       idx++;
-      render();
+      renderQuestion();
     } else {
-      alert(`Done! Final score: ${score} / ${BANK.length}`);
-      showQuiz(false);
+      alert(`End reached. Score: ${score} / ${BANK.length}`);
     }
   });
-
-  // Initial UI
-  updateBankInfo();
 </script>
 </body>
 </html>
