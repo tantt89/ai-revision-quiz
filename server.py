@@ -1,12 +1,10 @@
 import os
 import base64
 import json
+import time
 from flask import Flask, request, jsonify
 from openai import OpenAI
 
-# -----------------------------
-# Flask setup
-# -----------------------------
 app = Flask(__name__, static_folder="public", static_url_path="")
 
 client = OpenAI(
@@ -16,14 +14,35 @@ client = OpenAI(
 
 @app.route("/")
 def index():
-    # Serve public/quiz.html
     return app.send_static_file("quiz.html")
 
 
 # -----------------------------
-# STRICT MCQ-ONLY SCHEMA
+# Per-user sessions (in memory)
+# NOTE: resets if Render restarts (ok for revision)
 # -----------------------------
+SESSIONS = {}  # session_id -> {"pdf_hash": int, "mcq": [..], "updated": float}
+MAX_SESSIONS = 200
+SESSION_TTL_SECONDS = 6 * 60 * 60  # 6 hours
+
+
+def cleanup_sessions():
+    now = time.time()
+    # Remove old sessions
+    expired = [sid for sid, s in SESSIONS.items() if now - s.get("updated", now) > SESSION_TTL_SECONDS]
+    for sid in expired:
+        SESSIONS.pop(sid, None)
+
+    # Hard cap
+    if len(SESSIONS) > MAX_SESSIONS:
+        # drop oldest
+        oldest = sorted(SESSIONS.items(), key=lambda kv: kv[1].get("updated", 0))[: len(SESSIONS) - MAX_SESSIONS]
+        for sid, _ in oldest:
+            SESSIONS.pop(sid, None)
+
+
 def mcq_schema():
+    # Strict MCQ-only JSON schema (least error-prone)
     return {
         "type": "object",
         "additionalProperties": False,
@@ -48,10 +67,7 @@ def mcq_schema():
                                 "D": {"type": "string"},
                             },
                         },
-                        "answer": {
-                            "type": "string",
-                            "enum": ["A", "B", "C", "D"]
-                        },
+                        "answer": {"type": "string", "enum": ["A", "B", "C", "D"]},
                     },
                 },
             }
@@ -59,111 +75,120 @@ def mcq_schema():
     }
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def normalize(text: str) -> str:
+def norm(text: str) -> str:
     return " ".join((text or "").lower().strip().split())
 
 
-def dedupe_mcq(items):
-    seen = set()
+def dedupe(existing_mcq, new_mcq):
+    seen = {norm(q.get("prompt")) for q in existing_mcq}
     out = []
-    for q in items or []:
-        key = normalize(q.get("prompt"))
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(q)
+    for q in new_mcq or []:
+        key = norm(q.get("prompt"))
+        if key and key not in seen:
+            seen.add(key)
+            out.append(q)
     return out
 
 
-def generate_pass(pdf_name, pdf_data_url, count, label):
+def generate_next_mcq(pdf_name, pdf_data_url, count, avoid_prompts):
     schema = mcq_schema()
 
+    # To keep prompt size reasonable, only send last 80 prompts to avoid
+    avoid_prompts = avoid_prompts[-80:]
+    avoid_text = "\n".join(f"- {p}" for p in avoid_prompts) if avoid_prompts else "(none)"
+
     instructions = f"""
-Generate revision questions strictly from the PDF content ONLY.
-
-Return ONLY JSON matching the provided schema.
-
-This is {label} of 2.
-Generate EXACTLY {count} Multiple Choice Questions (MCQ).
+Generate EXACTLY {count} Multiple Choice Questions (MCQ) strictly from the PDF content ONLY.
 
 Rules:
-- Each question must test a DIFFERENT concept or fact.
-- Do NOT repeat or paraphrase earlier questions.
-- Exactly 4 options (A–D).
-- Only ONE correct answer.
+- Each question must test a DIFFERENT concept/fact.
+- Do NOT repeat or paraphrase any of the existing questions listed below.
+- Exactly 4 options (A–D), only ONE correct.
 - No explanations.
+
+Existing questions to avoid:
+{avoid_text}
 """
 
     resp = client.responses.create(
         model="gpt-5",
         instructions=instructions,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_file",
-                        "filename": pdf_name,
-                        "file_data": pdf_data_url,
-                    }
-                ],
-            }
-        ],
+        input=[{
+            "role": "user",
+            "content": [{
+                "type": "input_file",
+                "filename": pdf_name,
+                "file_data": pdf_data_url
+            }]
+        }],
         text={
             "format": {
                 "type": "json_schema",
                 "name": "quiz",
                 "schema": schema,
-                "strict": True,
+                "strict": True
             }
-        },
+        }
     )
 
-    return json.loads(resp.output_text)
+    parsed = json.loads(resp.output_text)
+    return parsed.get("mcq", [])
 
 
-# -----------------------------
-# API
-# -----------------------------
-@app.route("/api/generate-quiz-from-pdf", methods=["POST"])
-def generate_quiz():
-    try:
-        if "pdf" not in request.files:
-            return "No PDF uploaded", 400
-
-        pdf = request.files["pdf"]
-        data = pdf.read()
-        if not data:
-            return "Empty PDF", 400
-
-        # Convert PDF → base64 data URL
-        pdf_b64 = base64.b64encode(data).decode("utf-8")
-        pdf_data_url = "data:application/pdf;base64," + pdf_b64
-
-        print("PASS 1: generating 25 MCQ…", flush=True)
-        q1 = generate_pass(pdf.filename or "upload.pdf", pdf_data_url, 25, "PASS 1")
-
-        print("PASS 2: generating 25 MCQ…", flush=True)
-        q2 = generate_pass(pdf.filename or "upload.pdf", pdf_data_url, 25, "PASS 2")
-
-        # Merge + dedupe
-        mcq = dedupe_mcq((q1.get("mcq") or []) + (q2.get("mcq") or []))
-        mcq = mcq[:50]
-
-        print(f"Returning {len(mcq)} MCQ", flush=True)
-        return jsonify({"mcq": mcq})
-
-    except Exception as e:
-        print("ERROR:", repr(e), flush=True)
-        return jsonify({"error": str(e)}), 500
+@app.route("/api/reset", methods=["POST"])
+def reset():
+    cleanup_sessions()
+    session_id = request.form.get("session_id") or ""
+    if session_id:
+        SESSIONS.pop(session_id, None)
+    return jsonify({"ok": True})
 
 
-# -----------------------------
-# Local run (ignored by gunicorn)
-# -----------------------------
+@app.route("/api/next-20", methods=["POST"])
+def next_20():
+    cleanup_sessions()
+
+    session_id = request.form.get("session_id") or ""
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    pdf = request.files.get("pdf")
+    if not pdf:
+        return jsonify({"error": "No PDF uploaded (field name must be 'pdf')"}), 400
+
+    data = pdf.read()
+    if not data:
+        return jsonify({"error": "Empty PDF"}), 400
+
+    pdf_hash = hash(data)
+
+    # Initialize or validate session
+    s = SESSIONS.get(session_id)
+    if s is None:
+        s = {"pdf_hash": pdf_hash, "mcq": [], "updated": time.time()}
+        SESSIONS[session_id] = s
+    else:
+        if s.get("pdf_hash") != pdf_hash:
+            return jsonify({"error": "PDF does not match the one you started with. Click Reset and start again."}), 400
+
+    # Convert PDF to base64 data URL
+    pdf_b64 = base64.b64encode(data).decode("utf-8")
+    pdf_data_url = "data:application/pdf;base64," + pdf_b64
+
+    existing_prompts = [q.get("prompt", "") for q in s["mcq"]]
+
+    print(f"[{session_id}] Generating next 20… existing={len(s['mcq'])}", flush=True)
+    new_mcq = generate_next_mcq(pdf.filename or "upload.pdf", pdf_data_url, 20, existing_prompts)
+
+    # Dedupe against all existing
+    new_unique = dedupe(s["mcq"], new_mcq)
+    s["mcq"].extend(new_unique)
+    s["updated"] = time.time()
+
+    # Return full bank so UI can quiz from it
+    return jsonify({"mcq": s["mcq"], "added": len(new_unique)})
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
