@@ -51,9 +51,16 @@ def schema_mcq_only():
                     },
                 },
             },
-            "tf": {"type": "array"},
-            "fib": {"type": "array"},
-        },
+            "tf": {
+    "type": "array",
+    "items": {"type": "object", "additionalProperties": False},
+    "maxItems": 0
+},
+"fib": {
+    "type": "array",
+    "items": {"type": "object", "additionalProperties": False},
+    "maxItems": 0
+},
     }
 
 
@@ -175,3 +182,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     print(f"Local run: http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
