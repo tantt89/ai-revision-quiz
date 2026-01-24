@@ -2,26 +2,23 @@ import os
 import base64
 import json
 import time
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from openai import OpenAI
 
-# -----------------------------
-# App setup
-# -----------------------------
-app = Flask(__name__, static_folder="public")
+# Serve static files from /public
+# static_url_path="" means files are served at root like /quiz.html
+app = Flask(__name__, static_folder="public", static_url_path="")
 
-# OpenAI client (key comes from Render Environment Variables)
+# OpenAI key must be set in Render Environment Variables: OPENAI_API_KEY
 client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY"),
     timeout=180
 )
 
-# -----------------------------
-# Routes
-# -----------------------------
 @app.route("/")
 def index():
-    return send_from_directory("public", "quiz.html")
+    # Serves /public/quiz.html
+    return app.send_static_file("quiz.html")
 
 
 def strict_schema():
@@ -87,90 +84,112 @@ def strict_schema():
     }
 
 
-def generate_pass(pdf_name, pdf_data_url, mcq, tf, fib, label):
+def dedupe_by_prompt(items):
+    seen = set()
+    out = []
+    for it in items or []:
+        p = (it.get("prompt") or "").strip().lower()
+        if not p:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(it)
+    return out
+
+
+def generate_pass(pdf_name, pdf_data_url, mcq_n, tf_n, fib_n, label):
     schema = strict_schema()
 
     instructions = f"""
 Generate revision questions strictly from the PDF content ONLY.
+Return ONLY JSON matching the provided schema. No extra fields.
 
-Return ONLY JSON matching the provided schema.
-
-This is {label} of 2.
-MCQ: {mcq}
-True/False: {tf}
-Fill-in-the-Blank: {fib}
+This is {label} of 2. Create:
+- MCQ: {mcq_n}
+- True/False: {tf_n}
+- Fill-in-the-Blank: {fib_n}
 
 Rules:
-- MCQ: 4 options A-D, one correct
-- TF: answer must be "True" or "False"
-- FIB: use "__________" and provide acceptable answers
-- No explanations
+- MCQ: Exactly 4 options A-D, only ONE correct.
+- TF: answer must be "True" or "False".
+- FIB: prompt must contain "__________" once per blank.
+  Provide answers as an array of arrays (one array per blank) with acceptable variants.
+- No explanations.
 """
 
-    r = client.responses.create(
+    resp = client.responses.create(
         model="gpt-5",
         instructions=instructions,
-        input=[{
-            "role": "user",
-            "content": [{
-                "type": "input_file",
-                "filename": pdf_name,
-                "file_data": pdf_data_url
-            }]
-        }],
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "filename": pdf_name,
+                        "file_data": pdf_data_url,
+                    }
+                ],
+            }
+        ],
         text={
             "format": {
                 "type": "json_schema",
                 "name": "quiz",
                 "schema": schema,
-                "strict": True
+                "strict": True,
             }
-        }
+        },
     )
 
-    return json.loads(r.output_text)
+    # Parse JSON from output_text (avoids output_parsed issues)
+    return json.loads(resp.output_text)
 
 
 @app.route("/api/generate-quiz-from-pdf", methods=["POST"])
-def generate():
-    if "pdf" not in request.files:
-        return "No PDF uploaded", 400
+def generate_quiz():
+    try:
+        if "pdf" not in request.files:
+            return "No PDF uploaded (field name must be 'pdf')", 400
 
-    pdf = request.files["pdf"]
-    data = pdf.read()
+        pdf = request.files["pdf"]
+        pdf_bytes = pdf.read()
+        if not pdf_bytes:
+            return "PDF appears empty", 400
 
-    raw = base64.b64encode(data).decode("utf-8")
-    pdf_data_url = "data:application/pdf;base64," + raw
+        # PDF must be sent as a base64 data URL
+        raw_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        pdf_data_url = "data:application/pdf;base64," + raw_b64
 
-    print("Starting AI generation…")
+        # Two-pass generation: total 30/20/10
+        targets = {"mcq": 30, "tf": 20, "fib": 10}
+        half = {"mcq": 15, "tf": 10, "fib": 5}
 
-    q1 = generate_pass(pdf.filename, pdf_data_url, 15, 10, 5, "PASS 1")
-    q2 = generate_pass(pdf.filename, pdf_data_url, 15, 10, 5, "PASS 2")
+        t0 = time.time()
+        print("Generate request received. Starting PASS 1…", flush=True)
+        q1 = generate_pass(pdf.filename or "upload.pdf", pdf_data_url, half["mcq"], half["tf"], half["fib"], "PASS 1")
+        print("PASS 1 complete. Starting PASS 2…", flush=True)
+        q2 = generate_pass(pdf.filename or "upload.pdf", pdf_data_url, half["mcq"], half["tf"], half["fib"], "PASS 2")
+        print("PASS 2 complete. Merging…", flush=True)
 
-    def dedupe(items):
-        seen = set()
-        out = []
-        for x in items:
-            p = x["prompt"].lower().strip()
-            if p not in seen:
-                seen.add(p)
-                out.append(x)
-        return out
+        merged = {
+            "mcq": dedupe_by_prompt((q1.get("mcq") or []) + (q2.get("mcq") or []))[:targets["mcq"]],
+            "tf":  dedupe_by_prompt((q1.get("tf")  or []) + (q2.get("tf")  or []))[:targets["tf"]],
+            "fib": dedupe_by_prompt((q1.get("fib") or []) + (q2.get("fib") or []))[:targets["fib"]],
+        }
 
-    result = {
-        "mcq": dedupe(q1["mcq"] + q2["mcq"])[:30],
-        "tf":  dedupe(q1["tf"]  + q2["tf"])[:20],
-        "fib": dedupe(q1["fib"] + q2["fib"])[:10],
-    }
+        dt = time.time() - t0
+        print(f"Done in {dt:.1f}s -> {len(merged['mcq'])} MCQ, {len(merged['tf'])} TF, {len(merged['fib'])} FIB", flush=True)
+        return jsonify(merged)
 
-    print("Generation complete.")
-    return jsonify(result)
+    except Exception as e:
+        print("ERROR:", repr(e), flush=True)
+        return f"Server error: {str(e)}", 500
 
 
-# -----------------------------
-# ENTRY POINT (Render-safe)
-# -----------------------------
+# For local runs only. On Render with gunicorn, this block is ignored.
 if __name__ == "__main__":
-    port = int(os.environ["PORT"])  # Render ALWAYS provides this
-    print(f"Listening on 0.0.0.0:{port}")
+    port = int(os.environ.get("PORT", 3000))
+    print(f"Local run: http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
