@@ -5,17 +5,24 @@ import os
 import json
 import time
 
+# Serve static quiz.html from /public
 app = Flask(__name__, static_folder="public")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=180)  # 3 min timeout per call
+
+# Read API key from environment (Render: Environment Variables; Local: setx / export)
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    timeout=180  # seconds per API call
+)
 
 
 @app.route("/")
 def home():
+    # Serves /public/quiz.html
     return send_from_directory("public", "quiz.html")
 
 
 def build_schema():
-    # Strict JSON Schema: additionalProperties False everywhere
+    # Strict JSON Schema: additionalProperties must be False for all objects
     return {
         "type": "object",
         "additionalProperties": False,
@@ -78,7 +85,21 @@ def build_schema():
     }
 
 
-def call_openai_for_quiz(pdf_filename: str, pdf_data_url: str, mcq: int, tf: int, fib: int, pass_label: str):
+def dedupe_by_prompt(items):
+    seen = set()
+    out = []
+    for it in items or []:
+        p = (it.get("prompt") or "").strip().lower()
+        if not p:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(it)
+    return out
+
+
+def generate_pass(pdf_filename, pdf_data_url, mcq_n, tf_n, fib_n, pass_label):
     schema = build_schema()
 
     instructions = f"""
@@ -87,20 +108,20 @@ Generate revision questions strictly from the PDF content ONLY.
 Return ONLY JSON matching the provided schema. No extra fields.
 
 This is {pass_label} of 2. Create:
-- MCQ: {mcq}
-- True/False: {tf}
-- Fill-in-the-Blank: {fib}
+- MCQ: {mcq_n}
+- True/False: {tf_n}
+- Fill-in-the-Blank: {fib_n}
 
 Rules:
 - MCQ: Exactly 4 options A-D, only ONE correct.
 - TF: answer must be "True" or "False".
 - FIB: prompt must contain "__________" once per blank.
   Provide answers as an array of arrays (one array per blank) with acceptable variants.
-- Avoid repeating questions from earlier pass. Aim for variety across topics in the PDF.
+- Avoid repeating earlier questions; aim for variety across topics in the PDF.
 - No explanations.
 """
 
-    response = client.responses.create(
+    resp = client.responses.create(
         model="gpt-5",
         instructions=instructions,
         input=[
@@ -125,22 +146,8 @@ Rules:
         },
     )
 
-    # Parse JSON from output_text
-    return json.loads(response.output_text)
-
-
-def dedupe_by_prompt(items):
-    seen = set()
-    out = []
-    for it in items:
-        p = (it.get("prompt") or "").strip().lower()
-        if not p:
-            continue
-        if p in seen:
-            continue
-        seen.add(p)
-        out.append(it)
-    return out
+    # Parse JSON from output_text (robust across SDK versions)
+    return json.loads(resp.output_text)
 
 
 @app.route("/api/generate-quiz-from-pdf", methods=["POST"])
@@ -157,26 +164,22 @@ def generate_quiz():
         if not pdf_bytes:
             return "PDF appears empty", 400
 
-        # Convert PDF to base64 DATA URL
+        # Convert to base64 Data URL (required format for PDF file input)
         raw_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
         pdf_data_url = "data:application/pdf;base64," + raw_b64
 
-        # Two-pass generation totals: (15/10/5) + (15/10/5) = (30/20/10)
+        # Targets
         targets = {"mcq": 30, "tf": 20, "fib": 10}
-        pass_counts = {"mcq": 15, "tf": 10, "fib": 5}
+        half = {"mcq": 15, "tf": 10, "fib": 5}
 
         t0 = time.time()
-        print("Starting generation pass 1…")
-        q1 = call_openai_for_quiz(pdf.filename, pdf_data_url,
-                                  pass_counts["mcq"], pass_counts["tf"], pass_counts["fib"],
-                                  "PASS 1")
-        print("Pass 1 done.")
+        print("POST /api/generate-quiz-from-pdf: starting pass 1…")
+        q1 = generate_pass(pdf.filename, pdf_data_url, half["mcq"], half["tf"], half["fib"], "PASS 1")
+        print("Pass 1 complete.")
 
-        print("Starting generation pass 2…")
-        q2 = call_openai_for_quiz(pdf.filename, pdf_data_url,
-                                  pass_counts["mcq"], pass_counts["tf"], pass_counts["fib"],
-                                  "PASS 2")
-        print("Pass 2 done.")
+        print("POST /api/generate-quiz-from-pdf: starting pass 2…")
+        q2 = generate_pass(pdf.filename, pdf_data_url, half["mcq"], half["tf"], half["fib"], "PASS 2")
+        print("Pass 2 complete.")
 
         merged = {
             "mcq": dedupe_by_prompt((q1.get("mcq") or []) + (q2.get("mcq") or [])),
@@ -184,13 +187,13 @@ def generate_quiz():
             "fib": dedupe_by_prompt((q1.get("fib") or []) + (q2.get("fib") or [])),
         }
 
-        # Trim to exact targets (in case dedupe left extra)
+        # Trim to exact counts
         merged["mcq"] = merged["mcq"][:targets["mcq"]]
         merged["tf"]  = merged["tf"][:targets["tf"]]
         merged["fib"] = merged["fib"][:targets["fib"]]
 
         dt = time.time() - t0
-        print(f"Done. Returned {len(merged['mcq'])} MCQ, {len(merged['tf'])} TF, {len(merged['fib'])} FIB in {dt:.1f}s")
+        print(f"POST done in {dt:.1f}s -> {len(merged['mcq'])} MCQ, {len(merged['tf'])} TF, {len(merged['fib'])} FIB")
 
         return jsonify(merged)
 
@@ -200,5 +203,7 @@ def generate_quiz():
 
 
 if __name__ == "__main__":
-    print("Open http://localhost:3000")
-    app.run(port=3000)
+    # Render sets PORT dynamically; locally it will use 3000
+    port = int(os.environ.get("PORT", 3000))
+    print(f"Starting Flask on 0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port)
