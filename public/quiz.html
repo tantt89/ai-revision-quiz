@@ -16,9 +16,7 @@
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
     button { padding:10px 14px; border-radius:10px; border:0; cursor:pointer; font-weight:600; }
     button:disabled { opacity:.5; cursor:not-allowed; }
-    input[type="file"], input[type="number"], select {
-      padding:8px; border-radius:10px; border:0;
-    }
+    input[type="file"], input[type="number"], select { padding:8px; border-radius:10px; border:0; }
     input[type="number"] { width: 90px; }
     .status { margin-top:12px; padding:10px; border-radius:10px; background:rgba(255,255,255,.08); }
     .status.ok { background:rgba(56,211,159,.15); }
@@ -26,25 +24,42 @@
     .card { margin-top:14px; padding:14px; border-radius:12px; background:rgba(255,255,255,.06); }
     .grid { display:grid; grid-template-columns:1fr 300px; gap:14px; }
     @media (max-width:900px){ .grid{grid-template-columns:1fr;} }
-    .options label { display:block; padding:10px; border-radius:10px; background:rgba(255,255,255,.06); margin:10px 0; cursor:pointer; }
+
+    .options label {
+      display:block; padding:10px; border-radius:10px;
+      background:rgba(255,255,255,.06); margin:10px 0; cursor:pointer;
+      border: 2px solid transparent;
+    }
+
+    .feedback { margin-top:10px; font-weight:700; }
     .feedback.ok{color:#38d39f} .feedback.bad{color:#ff6b6b}
+
     .pill { padding:6px 10px; border-radius:999px; background:rgba(255,255,255,.1); display:inline-flex; gap:8px; align-items:center; }
-    .list button{width:100%; background:rgba(255,255,255,.06); border:0; padding:10px; text-align:left; color:#fff; }
-    .list button.active{background:rgba(56,211,159,.25)}
     .tiny { font-size: .92rem; opacity:.85; }
+
+    .list { border-radius:10px; overflow:hidden; }
+    .list button{
+      width:100%; background:rgba(255,255,255,.06); border:0; padding:10px;
+      text-align:left; color:#fff;
+    }
+    .list button.active{background:rgba(56,211,159,.25)}
+
+    /* Highlight states after Check */
+    .opt-correct { border-color: rgba(56,211,159,.9); background: rgba(56,211,159,.18) !important; }
+    .opt-wrong { border-color: rgba(255,107,107,.9); background: rgba(255,107,107,.15) !important; }
+    .opt-dim { opacity: .8; }
   </style>
 </head>
 
 <body>
 <div class="box">
   <h1>AI Revision Quiz</h1>
-  <div class="meta">Generate questions from selected PDF pages. Click reset to use another PDF.</div>
+  <div class="meta">Generate questions from selected PDF pages. CLick rest to use another PDF.</div>
 
   <div class="card">
     <div class="row">
       <input type="file" id="pdfFile" accept="application/pdf">
 
-      <!-- No default values -->
       <span class="pill">Start
         <input type="number" id="startPage" min="1" placeholder="e.g. 1">
       </span>
@@ -61,12 +76,11 @@
       <select id="mode">
         <option value="all">All</option>
         <option value="incorrect">Incorrect</option>
-        <option value="flagged">Flagged</option>
       </select>
     </div>
 
     <div id="status" class="status">Waiting for PDF + page range.</div>
-    <div class="tiny" id="smallTip">Tip: Smaller ranges (5–10 pages) generate faster.</div>
+    <div class="tiny">Shortcuts: 1–4 pick A–D, Enter = Check/Next.</div>
   </div>
 
   <div class="grid" id="quizGrid" style="display:none">
@@ -74,13 +88,13 @@
       <div id="progress"></div>
       <h3 id="prompt"></h3>
       <div class="options" id="options"></div>
+
       <div class="row">
-        <button id="flagBtn">Flag</button>
         <button id="checkBtn">Check</button>
         <button id="nextBtn" disabled>Next</button>
       </div>
+
       <div id="feedback" class="feedback"></div>
-      <div class="tiny">Shortcuts: 1–4 pick A–D, Enter = Check/Next.</div>
     </div>
 
     <div class="card">
@@ -91,10 +105,10 @@
 </div>
 
 <script>
-const SESSION = "quiz_v2_pdfonly";
+const SESSION = "quiz_v5_pdfonly_shortjump";
 let BANK = JSON.parse(localStorage.getItem(SESSION+"_bank")||"[]");
 let state = JSON.parse(localStorage.getItem(SESSION+"_state")||
-  '{"pos":0,"answers":{},"flags":{},"mode":"all"}');
+  '{"pos":0,"answers":{},"mode":"all"}');
 
 const $ = id => document.getElementById(id);
 
@@ -106,18 +120,97 @@ function save(){
 function queue(){
   return BANK.map((_,i)=>i).filter(i=>{
     if(state.mode==="incorrect") return state.answers[i]?.correct===false;
-    if(state.mode==="flagged") return state.flags[i];
     return true;
   });
 }
 
-function render(){
+function setStatus(msg, type=""){
+  $("status").textContent = msg;
+  $("status").className = "status " + type;
+}
+
+function clearHighlights(){
+  document.querySelectorAll("#options label").forEach(lab => {
+    lab.classList.remove("opt-correct", "opt-wrong", "opt-dim");
+  });
+}
+
+function applyHighlights(idxInBank){
+  const correct = BANK[idxInBank].answer;
+  const selected = state.answers[idxInBank]?.selected;
+
+  document.querySelectorAll("#options label").forEach(lab => {
+    const inp = lab.querySelector("input");
+    if (!inp) return;
+
+    const val = inp.value;
+    lab.classList.add("opt-dim");
+
+    if (val === correct) {
+      lab.classList.remove("opt-dim");
+      lab.classList.add("opt-correct");
+    }
+    if (selected && selected !== correct && val === selected) {
+      lab.classList.remove("opt-dim");
+      lab.classList.add("opt-wrong");
+    }
+  });
+}
+
+/* SHORT JUMP LIST: show only 5 before + current + 5 after */
+function renderJump(){
+  const q = queue();
+  const list = $("jumpList");
+  list.innerHTML = "";
+  if (!q.length) return;
+
+  const WINDOW = 5;
+  const start = Math.max(0, state.pos - WINDOW);
+  const end = Math.min(q.length - 1, state.pos + WINDOW);
+
+  if (start > 0) {
+    const more = document.createElement("div");
+    more.className = "tiny";
+    more.style.padding = "8px 10px";
+    more.textContent = `… ${start} earlier`;
+    list.appendChild(more);
+  }
+
+  for (let p = start; p <= end; p++) {
+    const bi = q[p];
+    const b = document.createElement("button");
+
+    const mark = state.answers[bi]
+      ? (state.answers[bi].correct ? "✅ " : "❌ ")
+      : "⬜ ";
+
+    b.textContent = `${mark}Q${bi + 1}`;
+    if (p === state.pos) b.classList.add("active");
+
+    b.onclick = () => {
+      state.pos = p;
+      save();
+      renderQuestion();
+    };
+
+    list.appendChild(b);
+  }
+
+  if (end < q.length - 1) {
+    const more = document.createElement("div");
+    more.className = "tiny";
+    more.style.padding = "8px 10px";
+    more.textContent = `… ${q.length - end - 1} more`;
+    list.appendChild(more);
+  }
+}
+
+function renderQuestion(){
   const q = queue();
   if(!q.length){
     $("quizGrid").style.display="none";
     return;
   }
-
   $("quizGrid").style.display="grid";
 
   if(state.pos < 0) state.pos = 0;
@@ -144,24 +237,18 @@ function render(){
   $("feedback").textContent="";
   $("feedback").className="feedback";
   $("nextBtn").disabled=true;
-  $("flagBtn").textContent = state.flags[idx] ? "Unflag" : "Flag";
 
-  // Jump list (current mode only)
-  $("jumpList").innerHTML="";
-  q.forEach((bi,p)=>{
-    const b=document.createElement("button");
-    const mark = state.answers[bi] ? (state.answers[bi].correct ? "✅ " : "❌ ") : "⬜ ";
-    const flag = state.flags[bi] ? "🚩 " : "";
-    b.textContent = `${mark}${flag}Q${bi+1}`;
-    if(p===state.pos) b.classList.add("active");
-    b.onclick=()=>{state.pos=p; save(); render();}
-    $("jumpList").appendChild(b);
-  });
-}
+  if (state.answers[idx]) {
+    const ok = state.answers[idx].correct;
+    const correct = BANK[idx].answer;
+    $("feedback").textContent = ok ? `Correct! (Answer: ${correct})` : `Wrong. Correct answer: ${correct}`;
+    $("feedback").className = "feedback " + (ok ? "ok" : "bad");
+    $("nextBtn").disabled = false;
+    applyHighlights(idx);
+  }
 
-function setStatus(msg, type=""){
-  $("status").textContent = msg;
-  $("status").className = "status " + type;
+  renderJump();
+  save();
 }
 
 // Generate questions
@@ -186,7 +273,7 @@ $("getBtn").onclick = async () => {
   setStatus("Generating… please wait.", "");
 
   const fd = new FormData();
-  fd.append("session_id", "sid_local"); // server expects this field
+  fd.append("session_id", "sid_local");
   fd.append("pdf", f);
   fd.append("start_page", start);
   fd.append("end_page", end);
@@ -202,14 +289,13 @@ $("getBtn").onclick = async () => {
     }
 
     BANK = d.mcq || BANK;
-
     setStatus(`Added ${d.added ?? 0} new questions. Total: ${BANK.length}`, "ok");
 
     $("continueBtn").disabled = BANK.length === 0;
     $("exportPdfBtn").disabled = BANK.length === 0;
 
     save();
-    render();
+    renderQuestion();
 
   } catch(err){
     console.error(err);
@@ -219,11 +305,11 @@ $("getBtn").onclick = async () => {
   }
 };
 
-$("continueBtn").onclick = () => render();
+$("continueBtn").onclick = () => renderQuestion();
 
 $("resetBtn").onclick = () => {
   BANK = [];
-  state = {pos:0, answers:{}, flags:{}, mode:"all"};
+  state = {pos:0, answers:{}, mode:"all"};
   save();
   location.reload();
 };
@@ -232,18 +318,10 @@ $("mode").onchange = (e) => {
   state.mode = e.target.value;
   state.pos = 0;
   save();
-  render();
+  renderQuestion();
 };
 
-$("flagBtn").onclick = () => {
-  const q = queue();
-  if(!q.length) return;
-  const idx = q[state.pos];
-  state.flags[idx] = !state.flags[idx];
-  save();
-  render();
-};
-
+// Check (shows correct answer + highlights)
 $("checkBtn").onclick = () => {
   const sel = document.querySelector("input[name=ans]:checked");
   if(!sel) return alert("Select an option first.");
@@ -251,24 +329,30 @@ $("checkBtn").onclick = () => {
   const q = queue();
   const idx = q[state.pos];
 
-  const ok = sel.value === BANK[idx].answer;
+  const correct = BANK[idx].answer;
+  const ok = sel.value === correct;
+
   state.answers[idx] = { selected: sel.value, correct: ok };
 
-  $("feedback").textContent = ok ? "Correct!" : `Wrong. Correct answer: ${BANK[idx].answer}`;
+  $("feedback").textContent = ok ? `Correct! (Answer: ${correct})` : `Wrong. Correct answer: ${correct}`;
   $("feedback").className = "feedback " + (ok ? "ok" : "bad");
   $("nextBtn").disabled = false;
 
+  clearHighlights();
+  applyHighlights(idx);
+
   save();
-  render(); // refresh jump indicators
+  renderJump();
 };
 
 $("nextBtn").onclick = () => {
   const q = queue();
   if(!q.length) return;
+
   if(state.pos < q.length - 1){
     state.pos++;
     save();
-    render();
+    renderQuestion();
   } else {
     alert("End of this review mode. Switch mode or generate more questions.");
   }
@@ -339,7 +423,7 @@ $("exportPdfBtn").onclick = () => {
 
   BANK.forEach((q, i) => {
     doc.setFont("helvetica", "bold");
-    addWrapped(`Q${i+1}${state.flags[i] ? " (FLAGGED)" : ""}`, 0);
+    addWrapped(`Q${i+1}`, 0);
     doc.setFont("helvetica", "normal");
     addWrapped(q.prompt, 0);
 
@@ -364,9 +448,10 @@ if(BANK.length){
   $("continueBtn").disabled = false;
   $("exportPdfBtn").disabled = false;
   setStatus(`Restored saved session. Total questions: ${BANK.length}`, "ok");
-  render();
+  renderQuestion();
+} else {
+  setStatus("Waiting for PDF + page range.", "");
 }
 </script>
 </body>
 </html>
-
