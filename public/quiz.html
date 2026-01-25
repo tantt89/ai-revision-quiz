@@ -4,250 +4,368 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>AI Revision Quiz</title>
+
+  <!-- jsPDF for PDF export -->
+  <script defer src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+
   <style>
     body { font-family: Arial, sans-serif; background:#0b1220; color:#fff; margin:0; padding:20px; }
-    .box { max-width: 980px; margin: 0 auto; background:#111a2e; padding:20px; border-radius:12px; }
-    h1 { margin: 0 0 8px; }
-    .meta { opacity:.85; margin-bottom: 10px; }
+    .box { max-width: 1100px; margin:auto; background:#111a2e; padding:20px; border-radius:12px; }
+    h1 { margin:0 0 6px; }
+    .meta { opacity:.85; margin-bottom:10px; }
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
     button { padding:10px 14px; border-radius:10px; border:0; cursor:pointer; font-weight:600; }
-    button:disabled { opacity:.55; cursor:not-allowed; }
-    input[type="file"] { padding:6px; }
-    input[type="number"] { width: 90px; padding:8px; border-radius:10px; border:0; }
-    .status { margin-top:12px; padding:10px; border-radius:10px; background: rgba(255,255,255,.08); }
-    .status.ok { background: rgba(56,211,159,.15); }
-    .status.bad { background: rgba(255,107,107,.15); }
-    .card { margin-top: 14px; padding: 14px; border-radius: 12px; background: rgba(255,255,255,.06); }
-    .qmeta { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; opacity:.9; }
-    .options label { display:block; padding:10px; border-radius:10px; background: rgba(255,255,255,.06); margin:10px 0; cursor:pointer; }
-    .options input { margin-right: 10px; }
-    .feedback { margin-top:10px; font-weight:700; }
-    .feedback.ok { color:#38d39f; }
-    .feedback.bad { color:#ff6b6b; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    input[type="file"], input[type="number"], select {
+      padding:8px; border-radius:10px; border:0;
+    }
+    input[type="number"] { width: 90px; }
+    .status { margin-top:12px; padding:10px; border-radius:10px; background:rgba(255,255,255,.08); }
+    .status.ok { background:rgba(56,211,159,.15); }
+    .status.bad { background:rgba(255,107,107,.15); }
+    .card { margin-top:14px; padding:14px; border-radius:12px; background:rgba(255,255,255,.06); }
+    .grid { display:grid; grid-template-columns:1fr 300px; gap:14px; }
+    @media (max-width:900px){ .grid{grid-template-columns:1fr;} }
+    .options label { display:block; padding:10px; border-radius:10px; background:rgba(255,255,255,.06); margin:10px 0; cursor:pointer; }
+    .feedback.ok{color:#38d39f} .feedback.bad{color:#ff6b6b}
+    .pill { padding:6px 10px; border-radius:999px; background:rgba(255,255,255,.1); display:inline-flex; gap:8px; align-items:center; }
+    .list button{width:100%; background:rgba(255,255,255,.06); border:0; padding:10px; text-align:left; color:#fff; }
+    .list button.active{background:rgba(56,211,159,.25)}
     .tiny { font-size: .92rem; opacity:.85; }
-    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background: rgba(255,255,255,.10); }
   </style>
 </head>
+
 <body>
-  <div class="box">
-    <h1>AI Revision Quiz</h1>
-    <div class="meta">Select a PDF and page range. Press get questions to start generating or to generate more questions. Click reset to change PDF.</div>
+<div class="box">
+  <h1>AI Revision Quiz</h1>
+  <div class="meta">Generate questions from selected PDF pages. Add more anytime without restarting.</div>
 
-    <div class="card">
-      <div class="row">
-        <input type="file" id="pdfFile" accept="application/pdf">
+  <div class="card">
+    <div class="row">
+      <input type="file" id="pdfFile" accept="application/pdf">
 
-        <label class="pill">Start page
-          <input type="number" id="startPage" value="1" min="1">
-        </label>
+      <!-- No default values -->
+      <span class="pill">Start
+        <input type="number" id="startPage" min="1" placeholder="e.g. 1">
+      </span>
 
-        <label class="pill">End page
-          <input type="number" id="endPage" value="5" min="1">
-        </label>
+      <span class="pill">End
+        <input type="number" id="endPage" min="1" placeholder="e.g. 5">
+      </span>
 
-        <button id="getBtn">Get Questions</button>
-        <button id="startBtn" disabled>Start Quiz</button>
-        <button id="resetBtn">Reset</button>
-      </div>
+      <button id="getBtn">Get Questions</button>
+      <button id="continueBtn" disabled>Continue</button>
+      <button id="resetBtn">Reset</button>
+      <button id="exportPdfBtn" disabled>Export PDF</button>
 
-      <div id="status" class="status">Status: Waiting for PDF.</div>
-      <div id="info" class="tiny"></div>
+      <select id="mode">
+        <option value="all">All</option>
+        <option value="incorrect">Incorrect</option>
+        <option value="flagged">Flagged</option>
+      </select>
     </div>
 
-    <div class="card" id="quizCard" style="display:none">
-      <div class="qmeta">
-        <div id="progress"></div>
-        <div id="score"></div>
-      </div>
+    <div id="status" class="status">Waiting for PDF + page range.</div>
+    <div class="tiny" id="smallTip">Tip: Smaller ranges (5–10 pages) generate faster.</div>
+  </div>
 
-      <h3 id="prompt" style="margin-top:10px"></h3>
-      <div id="options" class="options"></div>
-
+  <div class="grid" id="quizGrid" style="display:none">
+    <div class="card">
+      <div id="progress"></div>
+      <h3 id="prompt"></h3>
+      <div class="options" id="options"></div>
       <div class="row">
+        <button id="flagBtn">Flag</button>
         <button id="checkBtn">Check</button>
         <button id="nextBtn" disabled>Next</button>
       </div>
-
       <div id="feedback" class="feedback"></div>
+      <div class="tiny">Shortcuts: 1–4 pick A–D, Enter = Check/Next.</div>
+    </div>
+
+    <div class="card">
+      <h3>Jump to</h3>
+      <div class="list" id="jumpList"></div>
     </div>
   </div>
+</div>
 
 <script>
-  // ----------------------------
-  // Session ID
-  // ----------------------------
-  function getSessionId() {
-    const key = "ai_quiz_session_id";
-    let sid = localStorage.getItem(key);
-    if (!sid) {
-      sid = "sid_" + Math.random().toString(16).slice(2) + "_" + Date.now();
-      localStorage.setItem(key, sid);
-    }
-    return sid;
-  }
-  const SESSION_ID = getSessionId();
+const SESSION = "quiz_v2_pdfonly";
+let BANK = JSON.parse(localStorage.getItem(SESSION+"_bank")||"[]");
+let state = JSON.parse(localStorage.getItem(SESSION+"_state")||
+  '{"pos":0,"answers":{},"flags":{},"mode":"all"}');
 
-  // ----------------------------
-  // State
-  // ----------------------------
-  let BANK = [];
-  let idx = 0;
-  let score = 0;
+const $ = id => document.getElementById(id);
 
-  const $ = (id) => document.getElementById(id);
+function save(){
+  localStorage.setItem(SESSION+"_bank",JSON.stringify(BANK));
+  localStorage.setItem(SESSION+"_state",JSON.stringify(state));
+}
 
-  function setStatus(msg, kind="") {
-    const el = $("status");
-    el.textContent = "Status: " + msg;
-    el.className = "status " + (kind || "");
+function queue(){
+  return BANK.map((_,i)=>i).filter(i=>{
+    if(state.mode==="incorrect") return state.answers[i]?.correct===false;
+    if(state.mode==="flagged") return state.flags[i];
+    return true;
+  });
+}
+
+function render(){
+  const q = queue();
+  if(!q.length){
+    $("quizGrid").style.display="none";
+    return;
   }
 
-  function setInfo(msg="") {
-    $("info").textContent = msg;
+  $("quizGrid").style.display="grid";
+
+  if(state.pos < 0) state.pos = 0;
+  if(state.pos >= q.length) state.pos = q.length - 1;
+
+  const idx = q[state.pos];
+  const item = BANK[idx];
+
+  $("progress").textContent = `Mode: ${state.mode.toUpperCase()} • Q${idx+1} / ${BANK.length}`;
+  $("prompt").textContent = item.prompt;
+
+  $("options").innerHTML="";
+  const saved = state.answers[idx]?.selected;
+
+  ["A","B","C","D"].forEach(l=>{
+    const lab=document.createElement("label");
+    const opt = item.options?.[l] || "";
+    lab.innerHTML =
+      `<input type="radio" name="ans" value="${l}" ${saved===l?"checked":""}>
+       <b>${l})</b> ${opt}`;
+    $("options").appendChild(lab);
+  });
+
+  $("feedback").textContent="";
+  $("feedback").className="feedback";
+  $("nextBtn").disabled=true;
+  $("flagBtn").textContent = state.flags[idx] ? "Unflag" : "Flag";
+
+  // Jump list (current mode only)
+  $("jumpList").innerHTML="";
+  q.forEach((bi,p)=>{
+    const b=document.createElement("button");
+    const mark = state.answers[bi] ? (state.answers[bi].correct ? "✅ " : "❌ ") : "⬜ ";
+    const flag = state.flags[bi] ? "🚩 " : "";
+    b.textContent = `${mark}${flag}Q${bi+1}`;
+    if(p===state.pos) b.classList.add("active");
+    b.onclick=()=>{state.pos=p; save(); render();}
+    $("jumpList").appendChild(b);
+  });
+}
+
+function setStatus(msg, type=""){
+  $("status").textContent = msg;
+  $("status").className = "status " + type;
+}
+
+// Generate questions
+$("getBtn").onclick = async () => {
+  const f = $("pdfFile").files[0];
+  if(!f){
+    setStatus("Please select a PDF first.", "bad");
+    alert("Please select a PDF first.");
+    return;
   }
 
-  function showQuiz(show) {
-    $("quizCard").style.display = show ? "block" : "none";
+  const start = $("startPage").value;
+  const end = $("endPage").value;
+
+  if(!start || !end){
+    setStatus("Please enter BOTH start and end page numbers.", "bad");
+    alert("Please enter BOTH start and end page numbers.");
+    return;
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (m) => ({
-      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
-    }[m]));
-  }
+  $("getBtn").disabled = true;
+  setStatus("Generating… please wait.", "");
 
-  // ----------------------------
-  // Generate / append questions
-  // ----------------------------
-  $("getBtn").addEventListener("click", async () => {
-    const file = $("pdfFile").files[0];
-    if (!file) {
-      alert("Please select a PDF first.");
-      setStatus("No PDF selected.", "bad");
+  const fd = new FormData();
+  fd.append("session_id", "sid_local"); // server expects this field
+  fd.append("pdf", f);
+  fd.append("start_page", start);
+  fd.append("end_page", end);
+
+  try{
+    const r = await fetch("/api/next-20", { method:"POST", body: fd });
+    const d = await r.json();
+
+    if(!r.ok){
+      setStatus(d.error || "Server error.", "bad");
+      console.error(d);
       return;
     }
 
-    const startPage = $("startPage").value;
-    const endPage = $("endPage").value;
+    BANK = d.mcq || BANK;
 
-    $("getBtn").disabled = true;
-    setStatus("Generating questions… please wait.");
+    setStatus(`Added ${d.added ?? 0} new questions. Total: ${BANK.length}`, "ok");
 
-    const previousCount = BANK.length;
+    $("continueBtn").disabled = BANK.length === 0;
+    $("exportPdfBtn").disabled = BANK.length === 0;
 
-    const fd = new FormData();
-    fd.append("session_id", SESSION_ID);
-    fd.append("start_page", startPage);
-    fd.append("end_page", endPage);
-    fd.append("pdf", file);
+    save();
+    render();
 
-    try {
-      const res = await fetch("/api/next-20", { method: "POST", body: fd });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Server error" }));
-        console.error(err);
-        setStatus(err.error || "Server error.", "bad");
-        return;
-      }
+  } catch(err){
+    console.error(err);
+    setStatus("Network error. Please refresh and try again.", "bad");
+  } finally {
+    $("getBtn").disabled = false;
+  }
+};
 
-      const data = await res.json();
-      BANK = data.mcq || BANK;
+$("continueBtn").onclick = () => render();
 
-      const added = data.added ?? (BANK.length - previousCount);
-      setStatus(`Added ${added} new questions.`, "ok");
-      setInfo(`Total questions available: ${BANK.length}`);
+$("resetBtn").onclick = () => {
+  BANK = [];
+  state = {pos:0, answers:{}, flags:{}, mode:"all"};
+  save();
+  location.reload();
+};
 
-      $("startBtn").disabled = BANK.length === 0;
+$("mode").onchange = (e) => {
+  state.mode = e.target.value;
+  state.pos = 0;
+  save();
+  render();
+};
 
-      // 🔑 KEY FIX: do NOT reset idx
-      // If user already finished old questions, jump to first new one
-      if (previousCount > 0 && idx >= previousCount) {
-        renderQuestion();
-      }
+$("flagBtn").onclick = () => {
+  const q = queue();
+  if(!q.length) return;
+  const idx = q[state.pos];
+  state.flags[idx] = !state.flags[idx];
+  save();
+  render();
+};
 
-    } catch (e) {
-      console.error(e);
-      setStatus("Network error.", "bad");
-    } finally {
-      $("getBtn").disabled = false;
-    }
-  });
+$("checkBtn").onclick = () => {
+  const sel = document.querySelector("input[name=ans]:checked");
+  if(!sel) return alert("Select an option first.");
 
-  // ----------------------------
-  // Reset
-  // ----------------------------
-  $("resetBtn").addEventListener("click", async () => {
-    const fd = new FormData();
-    fd.append("session_id", SESSION_ID);
-    try { await fetch("/api/reset", { method: "POST", body: fd }); } catch {}
+  const q = queue();
+  const idx = q[state.pos];
 
-    BANK = [];
-    idx = 0;
-    score = 0;
-    showQuiz(false);
-    $("startBtn").disabled = true;
-    setStatus("Reset complete.", "ok");
-    setInfo("");
-  });
+  const ok = sel.value === BANK[idx].answer;
+  state.answers[idx] = { selected: sel.value, correct: ok };
 
-  // ----------------------------
-  // Quiz flow
-  // ----------------------------
-  $("startBtn").addEventListener("click", () => {
-    if (!BANK.length) return;
-    renderQuestion();
-    showQuiz(true);
-  });
+  $("feedback").textContent = ok ? "Correct!" : `Wrong. Correct answer: ${BANK[idx].answer}`;
+  $("feedback").className = "feedback " + (ok ? "ok" : "bad");
+  $("nextBtn").disabled = false;
 
-  function renderQuestion() {
-    $("nextBtn").disabled = true;
-    $("feedback").textContent = "";
-    $("feedback").className = "feedback";
+  save();
+  render(); // refresh jump indicators
+};
 
-    const total = BANK.length;
-    const q = BANK[idx];
+$("nextBtn").onclick = () => {
+  const q = queue();
+  if(!q.length) return;
+  if(state.pos < q.length - 1){
+    state.pos++;
+    save();
+    render();
+  } else {
+    alert("End of this review mode. Switch mode or generate more questions.");
+  }
+};
 
-    $("progress").textContent = `Question ${idx + 1} / ${total}`;
-    $("score").textContent = `Score ${score} / ${total}`;
-    $("prompt").textContent = q.prompt;
+// Keyboard shortcuts
+window.addEventListener("keydown", (e) => {
+  const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+  if(tag === "input" || tag === "select" || tag === "textarea") return;
 
-    const opts = q.options || {};
-    const optionsEl = $("options");
-    optionsEl.innerHTML = "";
-
-    ["A","B","C","D"].forEach(letter => {
-      const label = document.createElement("label");
-      label.innerHTML = `
-        <input type="radio" name="ans" value="${letter}">
-        <strong>${letter})</strong> ${escapeHtml(opts[letter] || "")}
-      `;
-      optionsEl.appendChild(label);
-    });
+  const map = { "1":"A", "2":"B", "3":"C", "4":"D" };
+  if(map[e.key]){
+    const el = document.querySelector(`input[name="ans"][value="${map[e.key]}"]`);
+    if(el) el.checked = true;
   }
 
-  $("checkBtn").addEventListener("click", () => {
-    const picked = document.querySelector('input[name="ans"]:checked');
-    if (!picked) { alert("Select an option."); return; }
+  if(e.key === "Enter"){
+    if($("nextBtn").disabled) $("checkBtn").click();
+    else $("nextBtn").click();
+  }
+});
 
-    const correct = BANK[idx].answer;
-    const ok = picked.value === correct;
-    if (ok) score++;
+// Export PDF
+$("exportPdfBtn").onclick = () => {
+  const JsPDF = window.jspdf?.jsPDF;
+  if(!JsPDF){
+    alert("PDF export library did not load. Please refresh and try again.");
+    return;
+  }
+  if(!BANK.length){
+    alert("No questions to export yet.");
+    return;
+  }
 
-    $("feedback").textContent = ok ? "Correct!" : `Incorrect. Correct answer: ${correct}`;
-    $("feedback").className = "feedback " + (ok ? "ok" : "bad");
-    $("nextBtn").disabled = false;
-  });
+  const doc = new JsPDF({ unit: "mm", format: "a4" });
+  const pageH = doc.internal.pageSize.getHeight();
+  const pageW = doc.internal.pageSize.getWidth();
 
-  $("nextBtn").addEventListener("click", () => {
-    if (idx < BANK.length - 1) {
-      idx++;
-      renderQuestion();
-    } else {
-      alert(`End reached. Score: ${score} / ${BANK.length}`);
+  const left = 12;
+  const right = 12;
+  const maxW = pageW - left - right;
+
+  let y = 14;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(14);
+  doc.text("AI Revision Quiz", left, y);
+  y += 8;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10);
+  doc.text(`Exported: ${new Date().toLocaleString()}`, left, y);
+  y += 8;
+
+  doc.setFontSize(11);
+
+  function addWrapped(text, indent=0){
+    const lines = doc.splitTextToSize(String(text || ""), maxW - indent);
+    for(const line of lines){
+      if(y > pageH - 14){
+        doc.addPage();
+        y = 14;
+      }
+      doc.text(line, left + indent, y);
+      y += 5;
     }
+  }
+
+  BANK.forEach((q, i) => {
+    doc.setFont("helvetica", "bold");
+    addWrapped(`Q${i+1}${state.flags[i] ? " (FLAGGED)" : ""}`, 0);
+    doc.setFont("helvetica", "normal");
+    addWrapped(q.prompt, 0);
+
+    addWrapped(`A) ${q.options?.A || ""}`, 2);
+    addWrapped(`B) ${q.options?.B || ""}`, 2);
+    addWrapped(`C) ${q.options?.C || ""}`, 2);
+    addWrapped(`D) ${q.options?.D || ""}`, 2);
+
+    const your = state.answers[i]?.selected || "-";
+    const status = state.answers[i] ? (state.answers[i].correct ? "Correct" : "Wrong") : "Unanswered";
+    addWrapped(`Correct: ${q.answer}  |  Your answer: ${your} (${status})`, 0);
+
+    y += 4;
   });
+
+  doc.save("ai-revision-quiz.pdf");
+};
+
+// Restore saved session
+$("mode").value = state.mode;
+if(BANK.length){
+  $("continueBtn").disabled = false;
+  $("exportPdfBtn").disabled = false;
+  setStatus(`Restored saved session. Total questions: ${BANK.length}`, "ok");
+  render();
+}
 </script>
 </body>
 </html>
-
-
