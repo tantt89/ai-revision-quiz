@@ -57,7 +57,7 @@
 <div class="box">
   <h1>AI Revision Quiz</h1>
   <div class="meta">
-    Get Questions = start (or change page range). Continue = generate Next 20 from the same pages.
+    Get Questions = append from the page range you typed. Continue = next 20 from the same pages. Reset = clears everything.
   </div>
 
   <div class="card">
@@ -112,7 +112,7 @@
 /* =======================
    Storage + Server Session
    ======================= */
-const SESSION = "quiz_generate_continue_v1";
+const SESSION = "quiz_append_pages_v1";
 const LS_BANK = SESSION + "_bank";
 const LS_STATE = SESSION + "_state";
 const LS_SERVER_SID = SESSION + "_server_session_id";
@@ -129,6 +129,7 @@ function saveBrowserState(){
   localStorage.setItem(LS_STATE, JSON.stringify(state));
   localStorage.setItem(LS_ACTIVE_RANGE, JSON.stringify(activeRange));
 }
+
 function clearBrowserState(){
   localStorage.removeItem(LS_BANK);
   localStorage.removeItem(LS_STATE);
@@ -141,6 +142,7 @@ function clearBrowserState(){
 function newSessionId(){
   return "sid_" + Math.random().toString(16).slice(2) + "_" + Date.now();
 }
+
 function getServerSessionId(){
   let sid = localStorage.getItem(LS_SERVER_SID);
   if(!sid){
@@ -149,6 +151,7 @@ function getServerSessionId(){
   }
   return sid;
 }
+
 function rotateServerSessionId(){
   localStorage.removeItem(LS_SERVER_SID);
   localStorage.setItem(LS_SERVER_SID, newSessionId());
@@ -197,7 +200,7 @@ function applyHighlights(idxInBank){
   });
 }
 
-/* Deduplicate questions to reduce repeats (client-side safety net) */
+/* Dedupe so questions don’t repeat as much */
 function questionKey(q){
   const opts = q.options || {};
   return [
@@ -226,8 +229,29 @@ function appendDedup(existing, incoming){
   return { out, added };
 }
 
+function ensurePdfSelected(){
+  const f = $("pdfFile").files[0];
+  if(!f){
+    setStatus("Please select the PDF file again (browser requires this for generating).", "bad");
+    alert("Please select the PDF file again.");
+    return null;
+  }
+  return f;
+}
+
+function readRangeFromInputs(){
+  const start = $("startPage").value;
+  const end = $("endPage").value;
+  if(!start || !end){
+    setStatus("Please enter BOTH start and end page numbers.", "bad");
+    alert("Please enter BOTH start and end page numbers.");
+    return null;
+  }
+  return { start: String(start), end: String(end) };
+}
+
 /* =======================
-   UI Render
+   Render
    ======================= */
 function renderJump(){
   const q = queue();
@@ -324,61 +348,27 @@ function renderQuestion(){
   saveBrowserState();
 }
 
-function ensurePdfSelected(){
-  const f = $("pdfFile").files[0];
-  if(!f){
-    setStatus("Please select the PDF file again (browser requires this for generating).", "bad");
-    alert("Please select the PDF file again.");
-    return null;
-  }
-  return f;
-}
-
-function readRangeFromInputs(){
-  const start = $("startPage").value;
-  const end = $("endPage").value;
-  if(!start || !end){
-    setStatus("Please enter BOTH start and end page numbers.", "bad");
-    alert("Please enter BOTH start and end page numbers.");
-    return null;
-  }
-  return { start: String(start), end: String(end) };
-}
-
 /* =======================
-   Generation (core)
+   Generation
    ======================= */
 let isGenerating = false;
 
-async function generateNextBatch({ freshStart }) {
-  if (isGenerating) return;
+async function generateBatchFromRange(range){
+  if(isGenerating) return;
   const pdf = ensurePdfSelected();
-  if (!pdf) return;
-
-  const range = freshStart ? readRangeFromInputs() : activeRange;
-  if (!range){
-    setStatus("No active page range. Use Get Questions first.", "bad");
-    return;
-  }
-
-  // If freshStart, we overwrite activeRange and start a new server session
-  if (freshStart) {
-    activeRange = { start: range.start, end: range.end };
-    saveBrowserState();
-  }
+  if(!pdf) return;
 
   isGenerating = true;
   $("getBtn").disabled = true;
   $("continueBtn").disabled = true;
 
-  const actionText = freshStart ? "Generating first batch…" : "Generating next 20…";
-  setStatus(actionText + " please wait.", "");
+  setStatus(`Generating… (Pages ${range.start}–${range.end}) please wait.`, "");
 
   const fd = new FormData();
   fd.append("session_id", getServerSessionId());
   fd.append("pdf", pdf);
-  fd.append("start_page", activeRange.start);
-  fd.append("end_page", activeRange.end);
+  fd.append("start_page", range.start);
+  fd.append("end_page", range.end);
 
   try{
     const r = await fetch("/api/next-20", { method:"POST", body: fd });
@@ -390,45 +380,27 @@ async function generateNextBatch({ freshStart }) {
       return;
     }
 
-    // Expect server returns new questions in d.mcq (or full list). We'll handle both safely.
     const incoming = Array.isArray(d.mcq) ? d.mcq :
                      Array.isArray(d.questions) ? d.questions :
                      Array.isArray(d.items) ? d.items : [];
 
-    if (!incoming.length){
-      setStatus("Server returned no questions. Try a smaller page range or click again.", "bad");
+    if(!incoming.length){
+      setStatus("Server returned no questions. Try again or use a smaller page range.", "bad");
       console.error("No questions in response:", d);
       return;
     }
 
-    // If freshStart, clear bank/progress first (start truly fresh)
-    if (freshStart) {
-      BANK = [];
-      state = { pos: 0, answers: {}, mode: "all" };
-      $("mode").value = "all";
-    }
-
-    // Append + dedupe
-    const beforeLen = BANK.length;
     const { out, added } = appendDedup(BANK, incoming);
     BANK = out;
 
-    // Keep user on the same question if they were already mid-quiz
-    // For freshStart, state.pos stays 0.
-    if (!freshStart) {
-      // do nothing: keep state.pos as-is
-    }
-
+    activeRange = { start: String(range.start), end: String(range.end) };
     saveBrowserState();
 
     $("exportPdfBtn").disabled = (BANK.length === 0);
     $("continueBtn").disabled = (BANK.length === 0);
 
-    const shownAdded = (typeof d.added === "number") ? d.added : added;
     const dedupNote = (added !== incoming.length) ? ` (dedup kept ${added}/${incoming.length})` : "";
-    const modeNote = `Pages ${activeRange.start}–${activeRange.end}`;
-
-    setStatus(`${modeNote}: added ${shownAdded}. Total questions: ${BANK.length}${dedupNote}`, "ok");
+    setStatus(`Added ${added}. Total questions: ${BANK.length}. Active pages: ${activeRange.start}–${activeRange.end}${dedupNote}`, "ok");
 
     renderQuestion();
     $("quizGrid").scrollIntoView({ behavior:"smooth", block:"start" });
@@ -444,39 +416,33 @@ async function generateNextBatch({ freshStart }) {
 }
 
 /* =======================
-   Buttons behaviour you want
+   Button behaviour you want
    ======================= */
 
 /* Get Questions:
-   - used at START
-   - used when changing page range later
-   - starts FRESH (clears bank) + new server session id
+   - use this when you change pages (or first time)
+   - APPENDS (does not reset Q1)
+   - rotates session id so server doesn't complain about changing pages
 */
 $("getBtn").onclick = async () => {
-  const pdf = ensurePdfSelected();
-  if (!pdf) return;
-
   const range = readRangeFromInputs();
-  if (!range) return;
+  if(!range) return;
 
-  // Start new session for new range so server won't complain about mixing PDFs/pages
-  rotateServerSessionId();
-
-  // Generate first batch fresh
-  await generateNextBatch({ freshStart: true });
+  rotateServerSessionId();      // server treats it as new generation context
+  await generateBatchFromRange(range);
 };
 
 /* Continue:
-   - generates Next 20 for the SAME range
-   - appends to existing bank
+   - generates next 20 for the current activeRange
+   - APPENDS (does not reset Q1)
 */
 $("continueBtn").onclick = async () => {
   if (BANK.length === 0 || !activeRange) {
-    setStatus("No active session yet. Upload PDF + range and click Get Questions first.", "bad");
+    setStatus("No active range yet. Set pages and click Get Questions first.", "bad");
     return;
   }
 
-  // If user is in incorrect mode but queue is empty, switch to all so UI shows
+  // If user is in incorrect mode but nothing is incorrect yet, switch to all so UI shows
   if (queue().length === 0) {
     state.mode = "all";
     $("mode").value = "all";
@@ -484,10 +450,10 @@ $("continueBtn").onclick = async () => {
     saveBrowserState();
   }
 
-  await generateNextBatch({ freshStart: false });
+  await generateBatchFromRange(activeRange);
 };
 
-/* Reset */
+/* Reset: the ONLY time you go back to Q1 */
 $("resetBtn").onclick = async () => {
   $("getBtn").disabled = true;
   $("continueBtn").disabled = true;
@@ -517,7 +483,7 @@ $("resetBtn").onclick = async () => {
   $("feedback").className = "feedback";
 
   $("getBtn").disabled = false;
-  setStatus("Reset complete. Upload a PDF, set pages, then click Get Questions.", "ok");
+  setStatus("Reset complete. Upload PDF, set pages, then click Get Questions.", "ok");
 };
 
 /* Mode change */
@@ -561,7 +527,7 @@ $("nextBtn").onclick = () => {
     saveBrowserState();
     renderQuestion();
   } else {
-    alert("End of this review mode. You can Continue to generate more, or change pages and Get Questions again.");
+    alert("End of list. Use Continue to generate more, or change pages and Get Questions to append other chapters.");
   }
 };
 
@@ -611,8 +577,7 @@ $("exportPdfBtn").onclick = () => {
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(10);
-  const rangeText = activeRange ? `Pages ${activeRange.start}–${activeRange.end}` : "Pages: -";
-  doc.text(`Exported: ${new Date().toLocaleString()} • ${rangeText}`, left, y);
+  doc.text(`Exported: ${new Date().toLocaleString()}`, left, y);
   y += 8;
 
   doc.setFontSize(11);
@@ -657,7 +622,7 @@ getServerSessionId();
 if(BANK.length){
   $("continueBtn").disabled = false;
   $("exportPdfBtn").disabled = false;
-  const rangeText = activeRange ? `Pages ${activeRange.start}–${activeRange.end}` : "No active pages";
+  const rangeText = activeRange ? `Active pages: ${activeRange.start}–${activeRange.end}` : "No active pages";
   setStatus(`Restored saved session. ${rangeText}. Total questions: ${BANK.length}`, "ok");
   renderQuestion();
 } else {
